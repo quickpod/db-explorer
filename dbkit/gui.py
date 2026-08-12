@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
-r"""DBExplorer -- a pure-stdlib tkinter GUI on top of the ``dbkit`` API.
+r"""DBExplorer -- an Aura (QuickOpen design system) GUI on top of the ``dbkit`` API.
 
-One main window: a left sidebar of sections (Connections, Browser, SQL editor,
-ERD) and a main panel that swaps to the selected section.  Every database
-operation calls the tested ``dbkit`` core (never re-implements SQL logic) and
-runs on a background thread so the UI stays responsive; results are marshalled
-back with ``self.after`` and reported in a clear inline bar -- a short success
-line or the :class:`~dbkit.DBError` message (never a raw traceback) on failure.
+A single Aura window: a sidebar of sections (Connections, Browser, SQL editor,
+ERD, About) and a main panel that swaps to the selected section.  Every
+database operation calls the tested ``dbkit`` core (never re-implements SQL
+logic) and runs on a background thread so the UI stays responsive; results are
+marshalled back with ``self.after`` and reported in the Aura status bar -- a
+short success line or the :class:`~dbkit.DBError` message (never a raw
+traceback) on failure.
 
-Design goals baked in here (mirroring the sibling PDF Toolkit app):
-  * pure standard-library tkinter/ttk -- NO third-party GUI deps.  Dark mode is
-    a ttk-style + QuickOpen palette swap.
-  * Importing this module does nothing.  Only :func:`main` builds a root window,
-    and it degrades gracefully (prints a message, returns 0) with no display.
+Design goals baked in here (mirrors the QuickOpen house style):
+  * built on the vendored ``dbkit/aura.py`` design system, which layers the
+    quickopen.ai look (deep space + light) over CustomTkinter.  Runtime deps:
+    ``customtkinter`` (+ ``darkdetect``) -- declared in requirements.txt; the
+    PyInstaller build adds ``--collect-all customtkinter``.
+  * Importing this module does nothing.  Only :func:`main` builds a root
+    window, and it degrades gracefully (prints a message, returns 0) with no
+    display or with customtkinter missing.
   * Frozen-exe safe: bundled assets resolve via ``sys._MEIPASS`` / the exe
     directory when ``sys.frozen`` is set -- never ``__file__``.
+  * The SQL editor (``tk.Text``) and the results grids (``ttk.Treeview``)
+    stay native tk/ttk -- restyled by Aura and registered with
+    ``aura.track`` where raw so they follow the dark/light toggle.
 
 100% AI-built, open source, published on QuickOpen (quickopen.ai). Apache-2.0.
 """
@@ -25,39 +32,15 @@ import os
 import sys
 import threading
 
-# NOTE: tkinter is imported lazily inside main()/build_app so that merely
-# importing this module (packaging, headless CI) never fails.
+# NOTE: tkinter/customtkinter are imported lazily inside main()/build_app so
+# that merely importing this module (packaging, headless CI) never fails.
 
 APP_NAME = "DBExplorer"
 APP_VERSION = "1.0.0"
 WINDOW_TITLE = "DBExplorer — by QuickOpen (quickopen.ai)"
 PROJECT_URL = "https://quickopen.ai"
 PAGE_SIZE = 100
-
-# ---- colour palettes (mirror the QuickOpen palette) -------------------------
-PALETTES = {
-    "light": {
-        "bg": "#f5f7fa", "surface": "#ffffff", "text": "#141820",
-        "muted": "#5b6472", "primary": "#2f5fe0", "primary_hi": "#2450c8",
-        "entry": "#ffffff", "border": "#d5dae2", "sel": "#2f5fe0",
-        "sel_fg": "#ffffff", "trough": "#e2e7ef", "ok": "#1f7a3d",
-        "err": "#c0392b",
-    },
-    "dark": {
-        "bg": "#0f1115", "surface": "#1a1e24", "text": "#f1f3f7",
-        "muted": "#9aa4b2", "primary": "#5b86f7", "primary_hi": "#7098ff",
-        "entry": "#1a1e24", "border": "#2a2f38", "sel": "#5b86f7",
-        "sel_fg": "#0f1115", "trough": "#2a2f38", "ok": "#5bd68a",
-        "err": "#ff6b5e",
-    },
-}
-
-SECTIONS = [
-    ("connections", "Connections"),
-    ("browser", "Browser"),
-    ("sql", "SQL editor"),
-    ("erd", "ERD"),
-]
+ACCENT = "#2f5fe0"      # publish/specs/db-explorer.json "accent": [47, 95, 224]
 
 SECTION_DESC = {
     "connections": "Add a SQLite file or a Postgres/MySQL URL, then connect. "
@@ -113,34 +96,33 @@ def open_with_default_app(path):
 
 
 # ---------------------------------------------------------------------------
-# The app (built lazily; tkinter imported only inside build_app/main)
+# The app (built lazily; tkinter/customtkinter imported only inside build_app)
 # ---------------------------------------------------------------------------
 def build_app():
-    """Construct and return the App class bound to a live tkinter import.
+    """Construct and return the App class bound to live GUI imports.
 
-    Kept inside a function so this module imports cleanly without a display.
+    Kept inside a function so this module imports cleanly without a display
+    (and without customtkinter installed).
     """
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox, simpledialog
+    import customtkinter as ctk
 
-    from . import guiconfig, conn, introspect, query, edit, erd
+    from . import aura, guiconfig, conn, introspect, query, edit, erd
     from .errors import DBError
 
-    FONT = "Segoe UI"
-
-    class App(tk.Tk):
+    class App(aura.AuraApp):
         def __init__(self):
-            super().__init__()
-            self.title(WINDOW_TITLE)
-            self.geometry("1120x720")
-            self.minsize(900, 580)
+            super().__init__(
+                title=WINDOW_TITLE, app_name=APP_NAME, accent=ACCENT,
+                theme=guiconfig.get_theme(),
+                icon_png=asset_path("db-explorer.png"), version=APP_VERSION,
+                tagline="offline SQL client",
+                on_theme_change=guiconfig.set_theme,
+                size=(1120, 720), min_size=(900, 580))
 
-            self.theme = guiconfig.get_theme()
             self._busy = False
-            self._tracked = []          # (tk_widget, role) for manual re-theming
-            self._img_refs = []
-            self._panels = {}
-            self._current = None
+            self._img_refs_gui = []
 
             # active connection state
             self.engine = None
@@ -152,16 +134,39 @@ def build_app():
 
             self._set_icon()
             self._build_menu()
-            self._build_layout()
-            self._apply_theme()
+            self.conn_lbl = aura.Caption(self.header_actions, "not connected")
+            self.conn_lbl.pack(side="right")
+
+            self.add_section("connections", "Connections", "⛁",
+                             self._build_connections)
+            self.add_section("browser", "Browser", "▤", self._build_browser)
+            self.add_section("sql", "SQL editor", "✎", self._build_sql)
+            self.add_section("erd", "ERD", "◈", self._build_erd)
+            self.add_section("about", "About", "◉", self._build_about)
+            self.show("connections")
+            self.set_status("Ready")
             self.protocol("WM_DELETE_WINDOW", self._on_close)
-            self.after(50, self._select_first)
+
+        # ---- navigation ---------------------------------------------------
+        def show(self, sid):
+            """Raise a section, then run its optional ``_enter_<sid>`` hook."""
+            super().show(sid)
+            hook = getattr(self, "_enter_" + sid, None)
+            if hook:
+                hook()
+
+        def _desc(self, parent, sid):
+            """The short section description under the header (house style)."""
+            text = SECTION_DESC.get(sid)
+            if text:
+                aura.Caption(parent, text, wraplength=780,
+                             justify="left").pack(anchor="w", pady=(0, 10))
 
         # ---- assets / icon ------------------------------------------------
         def _set_icon(self):
             try:
                 ico = asset_path("db-explorer.ico")
-                if ico:
+                if ico and os.name == "nt":
                     self.iconbitmap(ico)
                     return
             except Exception:
@@ -170,227 +175,45 @@ def build_app():
                 png = asset_path("db-explorer.png")
                 if png:
                     img = tk.PhotoImage(file=png)
-                    self._img_refs.append(img)
+                    self._img_refs_gui.append(img)
                     self.iconphoto(True, img)
             except Exception:
                 pass  # icon is cosmetic; never block launch
 
-        # ---- theming ------------------------------------------------------
-        def track(self, widget, role):
-            self._tracked.append((widget, role))
-
-        def _pal(self):
-            return PALETTES[self.theme]
-
-        def _apply_theme(self):
-            p = self._pal()
-            style = ttk.Style(self)
-            try:
-                style.theme_use("clam")
-            except Exception:
-                pass
-            self.configure(bg=p["bg"])
-            style.configure(".", background=p["bg"], foreground=p["text"],
-                            fieldbackground=p["entry"], bordercolor=p["border"],
-                            font=(FONT, 10))
-            style.configure("TFrame", background=p["bg"])
-            style.configure("Sidebar.TFrame", background=p["surface"])
-            style.configure("TLabel", background=p["bg"], foreground=p["text"])
-            style.configure("Muted.TLabel", background=p["bg"], foreground=p["muted"])
-            style.configure("Header.TLabel", background=p["bg"], foreground=p["text"],
-                            font=(FONT, 15, "bold"))
-            style.configure("Sub.TLabel", background=p["bg"], foreground=p["muted"],
-                            font=(FONT, 10))
-            style.configure("Brand.TLabel", background=p["surface"],
-                            foreground=p["text"], font=(FONT, 12, "bold"))
-            style.configure("Status.TLabel", background=p["surface"],
-                            foreground=p["muted"])
-            style.configure("TButton", background=p["surface"], foreground=p["text"],
-                            bordercolor=p["border"], focuscolor=p["surface"],
-                            padding=(10, 5))
-            style.map("TButton",
-                      background=[("active", p["trough"]), ("disabled", p["bg"])],
-                      foreground=[("disabled", p["muted"])])
-            style.configure("Accent.TButton", background=p["primary"],
-                            foreground="#ffffff", padding=(12, 6))
-            style.map("Accent.TButton",
-                      background=[("active", p["primary_hi"]),
-                                  ("disabled", p["border"])],
-                      foreground=[("disabled", p["muted"])])
-            style.configure("Toggle.TButton", background=p["surface"],
-                            foreground=p["text"], padding=(8, 4))
-            for name in ("TEntry", "TSpinbox"):
-                style.configure(name, fieldbackground=p["entry"], foreground=p["text"],
-                                insertcolor=p["text"], bordercolor=p["border"])
-            style.configure("TCombobox", fieldbackground=p["entry"],
-                            foreground=p["text"], background=p["surface"],
-                            arrowcolor=p["text"])
-            style.map("TCombobox", fieldbackground=[("readonly", p["entry"])],
-                      foreground=[("readonly", p["text"])])
-            style.configure("TCheckbutton", background=p["bg"], foreground=p["text"])
-            style.map("TCheckbutton", background=[("active", p["bg"])])
-            style.configure("TLabelframe", background=p["bg"], foreground=p["text"],
-                            bordercolor=p["border"])
-            style.configure("TLabelframe.Label", background=p["bg"],
-                            foreground=p["muted"])
-            style.configure("Treeview", background=p["surface"],
-                            fieldbackground=p["surface"], foreground=p["text"],
-                            bordercolor=p["border"], rowheight=22)
-            style.map("Treeview", background=[("selected", p["primary"])],
-                      foreground=[("selected", p["sel_fg"])])
-            style.configure("Treeview.Heading", background=p["surface"],
-                            foreground=p["muted"], font=(FONT, 9, "bold"))
-            style.configure("Sidebar.Treeview", background=p["surface"],
-                            fieldbackground=p["surface"])
-            style.configure("TScrollbar", background=p["surface"],
-                            troughcolor=p["bg"], bordercolor=p["border"],
-                            arrowcolor=p["text"])
-            style.configure("TSeparator", background=p["border"])
-
-            for widget, role in list(self._tracked):
-                try:
-                    if role == "listbox":
-                        widget.configure(bg=p["surface"], fg=p["text"],
-                                         selectbackground=p["primary"],
-                                         selectforeground=p["sel_fg"],
-                                         highlightthickness=1,
-                                         highlightbackground=p["border"], borderwidth=0)
-                    elif role == "text":
-                        widget.configure(bg=p["surface"], fg=p["text"],
-                                         insertbackground=p["text"],
-                                         selectbackground=p["primary"],
-                                         selectforeground=p["sel_fg"],
-                                         highlightthickness=1,
-                                         highlightbackground=p["border"], borderwidth=0)
-                except Exception:
-                    pass
-
-        def toggle_theme(self):
-            self.theme = "dark" if self.theme == "light" else "light"
-            guiconfig.set_theme(self.theme)
-            self._apply_theme()
-            self._theme_btn.configure(
-                text="☀ Light mode" if self.theme == "dark" else "🌙 Dark mode")
-
-        # ---- menu ---------------------------------------------------------
+        # ---- menu (native menus stay; theme lives in the sidebar toggle) --
         def _build_menu(self):
             bar = tk.Menu(self)
             filem = tk.Menu(bar, tearoff=0)
-            filem.add_command(label="Open SQLite file…", command=self._quick_open_sqlite)
+            filem.add_command(label="Open SQLite file…",
+                              command=self._quick_open_sqlite)
             filem.add_separator()
             filem.add_command(label="Exit", command=self._on_close)
             bar.add_cascade(label="File", menu=filem)
 
             viewm = tk.Menu(bar, tearoff=0)
-            viewm.add_command(label="Toggle dark mode", command=self.toggle_theme)
+            viewm.add_command(
+                label="Toggle dark mode",
+                command=lambda: self.set_theme(
+                    "light" if self.theme == "dark" else "dark"))
             bar.add_cascade(label="View", menu=viewm)
 
             helpm = tk.Menu(bar, tearoff=0)
-            helpm.add_command(label="About", command=self._about)
+            helpm.add_command(label="About",
+                              command=lambda: self.show("about"))
             helpm.add_command(label="Open project page (quickopen.ai)",
                               command=lambda: open_with_default_app(PROJECT_URL))
             bar.add_cascade(label="Help", menu=helpm)
             self.configure(menu=bar)
 
-        # ---- layout -------------------------------------------------------
-        def _build_layout(self):
-            top = ttk.Frame(self, style="Sidebar.TFrame", padding=(12, 8))
-            top.pack(fill="x", side="top")
-            ttk.Label(top, text="DBExplorer", style="Brand.TLabel").pack(side="left")
-            ttk.Label(top, style="Status.TLabel",
-                      text="  offline · open source · by QuickOpen").pack(side="left")
-            self._theme_btn = ttk.Button(
-                top, style="Toggle.TButton", command=self.toggle_theme,
-                text="☀ Light mode" if self.theme == "dark" else "🌙 Dark mode")
-            self._theme_btn.pack(side="right")
-            self.conn_lbl = ttk.Label(top, style="Status.TLabel",
-                                      text="not connected")
-            self.conn_lbl.pack(side="right", padx=12)
-
-            body = ttk.Frame(self, style="TFrame")
-            body.pack(fill="both", expand=True)
-
-            side = ttk.Frame(body, style="Sidebar.TFrame", width=190)
-            side.pack(side="left", fill="y")
-            side.pack_propagate(False)
-            self.nav = ttk.Treeview(side, show="tree", selectmode="browse",
-                                    style="Sidebar.Treeview")
-            self.nav.pack(fill="both", expand=True, padx=6, pady=6)
-            self._nav_ids = {}
-            for sid, label in SECTIONS:
-                iid = self.nav.insert("", "end", text="  " + label)
-                self._nav_ids[iid] = sid
-            self.nav.bind("<<TreeviewSelect>>", self._on_nav_select)
-
-            main = ttk.Frame(body, style="TFrame", padding=(16, 12))
-            main.pack(side="left", fill="both", expand=True)
-            head = ttk.Frame(main, style="TFrame")
-            head.pack(fill="x")
-            self.title_lbl = ttk.Label(head, text="Welcome", style="Header.TLabel")
-            self.title_lbl.pack(anchor="w")
-            self.desc_lbl = ttk.Label(head, text="", style="Sub.TLabel",
-                                      wraplength=760, justify="left")
-            self.desc_lbl.pack(anchor="w", pady=(2, 8))
-            ttk.Separator(main).pack(fill="x")
-            self.container = ttk.Frame(main, style="TFrame")
-            self.container.pack(fill="both", expand=True, pady=(10, 8))
-
-            bar = ttk.Frame(self, style="Sidebar.TFrame", padding=(12, 6))
-            bar.pack(fill="x", side="bottom")
-            self.status_lbl = ttk.Label(bar, text="Ready", style="Status.TLabel",
-                                        width=14, anchor="w")
-            self.status_lbl.pack(side="left")
-            self.result_lbl = ttk.Label(bar, text="", style="Status.TLabel",
-                                        anchor="w", wraplength=820, justify="left")
-            self.result_lbl.pack(side="left", fill="x", expand=True, padx=8)
-
-        # ---- navigation ---------------------------------------------------
-        def _select_first(self):
-            for iid in self._nav_ids:
-                self.nav.selection_set(iid)
-                break
-
-        def select_section(self, sid):
-            for iid, s in self._nav_ids.items():
-                if s == sid:
-                    self.nav.selection_set(iid)
-                    return
-
-        def _on_nav_select(self, _e=None):
-            sel = self.nav.selection()
-            if not sel:
-                return
-            sid = self._nav_ids.get(sel[0])
-            if sid:
-                self._show_section(sid)
-
-        def _show_section(self, sid):
-            if self._current is not None:
-                self._current.pack_forget()
-            panel = self._panels.get(sid)
-            if panel is None:
-                panel = ttk.Frame(self.container, style="TFrame")
-                getattr(self, "_build_" + sid)(panel)
-                self._panels[sid] = panel
-                self._apply_theme()
-            panel.pack(fill="both", expand=True)
-            self._current = panel
-            self.title_lbl.configure(text=dict(SECTIONS)[sid])
-            self.desc_lbl.configure(text=SECTION_DESC.get(sid, ""))
-            self._clear_result()
-            hook = getattr(self, "_enter_" + sid, None)
-            if hook:
-                hook()
-
         # ---- background runner --------------------------------------------
         def _bg(self, work, on_ok, button=None, busy="Working…"):
             """Run ``work()`` off the UI thread; call ``on_ok(result)`` back on it.
 
-            Errors show inline (the DBError message, never a traceback).  Refuses
-            to start a second op while one is in flight.
+            Errors show in the status bar (the DBError message, never a
+            traceback).  Refuses to start a second op while one is in flight.
             """
             if self._busy:
-                self._show_error("Please wait — an operation is already running.")
+                self.set_error("Please wait — an operation is already running.")
                 return
             self._busy = True
             if button is not None:
@@ -398,7 +221,7 @@ def build_app():
                     button.state(["disabled"])
                 except Exception:
                     pass
-            self._set_status(busy, kind="working")
+            self.set_status(busy, kind="working")
 
             def run():
                 try:
@@ -417,125 +240,115 @@ def build_app():
                     except Exception:
                         pass
                 if err is not None:
-                    self._set_status("error", kind="err")
-                    self._show_error(err)
+                    self.set_error(err)
                     return
-                self._set_status("done", kind="ok")
                 try:
                     on_ok(res)
                 except Exception as ex:
-                    self._show_error(f"Post-processing error: {ex}")
+                    self.set_error(f"Post-processing error: {ex}")
 
             threading.Thread(target=run, daemon=True).start()
-
-        # ---- result bar ---------------------------------------------------
-        def _set_status(self, text, kind="idle"):
-            p = self._pal()
-            color = {"working": p["primary"], "ok": p["ok"], "err": p["err"]}.get(
-                kind, p["muted"])
-            self.status_lbl.configure(text=text, foreground=color)
-
-        def _clear_result(self, keep_status=False):
-            self.result_lbl.configure(text="")
-            if not keep_status:
-                self._set_status("Ready")
-
-        def _show_error(self, message):
-            self.result_lbl.configure(text="✕ " + message,
-                                      foreground=self._pal()["err"])
-
-        def _show_ok(self, message):
-            self.result_lbl.configure(text="✓ " + message,
-                                      foreground=self._pal()["ok"])
-            self._set_status("done", kind="ok")
 
         # =================================================================
         # Section: Connections
         # =================================================================
         def _build_connections(self, parent):
-            left = ttk.Frame(parent, style="TFrame")
-            left.pack(side="left", fill="y", padx=(0, 12))
-            ttk.Label(left, text="Saved profiles", style="Sub.TLabel").pack(anchor="w")
-            self.prof_list = tk.Listbox(left, height=16, width=28, activestyle="none",
-                                        exportselection=False)
-            self.prof_list.pack(fill="y", expand=True, pady=(4, 6))
-            self.track(self.prof_list, "listbox")
-            self.prof_list.bind("<<ListboxSelect>>", lambda _e: self._load_selected_profile())
-            row = ttk.Frame(left, style="TFrame")
-            row.pack(fill="x")
-            ttk.Button(row, text="Connect", style="Accent.TButton",
-                       command=self._connect_selected).pack(side="left")
-            ttk.Button(row, text="Delete", command=self._delete_selected).pack(
-                side="left", padx=4)
+            self._desc(parent, "connections")
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(fill="both", expand=True)
 
-            form = ttk.LabelFrame(parent, text="Add / edit profile", padding=10)
+            saved = aura.Card(row, title="Saved profiles")
+            saved.pack(side="left", fill="y", padx=(0, 14))
+            self.prof_list = tk.Listbox(saved.body, height=16, width=30,
+                                        activestyle="none",
+                                        exportselection=False)
+            self.prof_list.pack(fill="both", expand=True, pady=(0, 10))
+            aura.track(self.prof_list, "listbox")
+            self.prof_list.bind("<<ListboxSelect>>",
+                                lambda _e: self._load_selected_profile())
+            btns = ctk.CTkFrame(saved.body, fg_color="transparent")
+            btns.pack(fill="x")
+            aura.AuraButton(btns, "Connect",
+                            command=self._connect_selected).pack(side="left")
+            aura.AuraButton(btns, "Delete", kind="danger",
+                            command=self._delete_selected).pack(
+                side="left", padx=(8, 0))
+
+            form = aura.Card(row, title="Add / edit profile")
             form.pack(side="left", fill="both", expand=True)
 
             self.kind_var = tk.StringVar(value="sqlite")
-            krow = ttk.Frame(form, style="TFrame")
-            krow.pack(fill="x", pady=(0, 6))
-            ttk.Radiobutton(krow, text="SQLite file", variable=self.kind_var,
-                            value="sqlite", command=self._sync_kind).pack(side="left")
-            ttk.Radiobutton(krow, text="Database URL", variable=self.kind_var,
-                            value="url", command=self._sync_kind).pack(side="left",
-                                                                       padx=12)
+            krow = ctk.CTkFrame(form.body, fg_color="transparent")
+            krow.pack(fill="x", pady=(0, 10))
+            ctk.CTkRadioButton(krow, text="SQLite file",
+                               variable=self.kind_var, value="sqlite",
+                               command=self._sync_kind,
+                               font=aura.font()).pack(side="left")
+            ctk.CTkRadioButton(krow, text="Database URL",
+                               variable=self.kind_var, value="url",
+                               command=self._sync_kind,
+                               font=aura.font()).pack(side="left", padx=14)
 
             self.name_var = tk.StringVar()
-            self._form_field(form, "Profile name", self.name_var)
+            self._form_field(form.body, "Profile name", self.name_var)
 
             # swappable body holding the SQLite path row OR the URL row
-            body = ttk.Frame(form, style="TFrame")
+            body = ctk.CTkFrame(form.body, fg_color="transparent")
             body.pack(fill="x")
 
             self.path_var = tk.StringVar()
-            self.path_row = ttk.Frame(body, style="TFrame")
-            ttk.Label(self.path_row, text="SQLite file", width=14, anchor="w").pack(
-                side="left")
-            ttk.Entry(self.path_row, textvariable=self.path_var).pack(
-                side="left", fill="x", expand=True, padx=(0, 6))
-            ttk.Button(self.path_row, text="Browse…", command=self._browse_sqlite,
-                       width=10).pack(side="left")
+            self.path_row = ctk.CTkFrame(body, fg_color="transparent")
+            ctk.CTkLabel(self.path_row, text="SQLite file", width=110,
+                         anchor="w", font=aura.font()).pack(side="left")
+            aura.AuraEntry(self.path_row, textvariable=self.path_var).pack(
+                side="left", fill="x", expand=True, padx=(0, 8))
+            aura.AuraButton(self.path_row, "Browse…", kind="secondary",
+                            command=self._browse_sqlite).pack(side="left")
 
             self.url_var = tk.StringVar()
-            self.url_row = ttk.Frame(body, style="TFrame")
-            ttk.Label(self.url_row, text="Database URL", width=14, anchor="w").pack(
-                side="left")
-            ttk.Entry(self.url_row, textvariable=self.url_var).pack(
+            self.url_row = ctk.CTkFrame(body, fg_color="transparent")
+            ctk.CTkLabel(self.url_row, text="Database URL", width=110,
+                         anchor="w", font=aura.font()).pack(side="left")
+            aura.AuraEntry(self.url_row, textvariable=self.url_var).pack(
                 side="left", fill="x", expand=True)
 
             self.store_pw_var = tk.BooleanVar(value=False)
-            self.pw_check = ttk.Checkbutton(
+            self.pw_check = ctk.CTkCheckBox(
                 body, text="Store password in the URL on disk (not recommended)",
-                variable=self.store_pw_var)
+                variable=self.store_pw_var, font=aura.font())
 
-            ttk.Label(form, style="Muted.TLabel", wraplength=520, justify="left",
-                      text="Example URL: postgresql+psycopg2://user@host:5432/dbname "
-                           "(leave the password out — you'll be prompted). SQLite "
-                           "needs no driver; Postgres/MySQL need psycopg2 / pymysql."
-                      ).pack(anchor="w", pady=(8, 6))
+            aura.Caption(
+                form.body, wraplength=540, justify="left",
+                text="Example URL: postgresql+psycopg2://user@host:5432/dbname "
+                     "(leave the password out — you'll be prompted). SQLite "
+                     "needs no driver; Postgres/MySQL need psycopg2 / pymysql."
+            ).pack(anchor="w", pady=(10, 8))
 
-            brow = ttk.Frame(form, style="TFrame")
+            brow = ctk.CTkFrame(form.body, fg_color="transparent")
             brow.pack(fill="x", pady=(4, 0))
-            ttk.Button(brow, text="Save profile", style="Accent.TButton",
-                       command=self._save_profile).pack(side="left")
-            ttk.Button(brow, text="Save & connect",
-                       command=self._save_and_connect).pack(side="left", padx=6)
+            aura.AuraButton(brow, "Save profile",
+                            command=self._save_profile).pack(side="left")
+            aura.AuraButton(brow, "Save & connect", kind="secondary",
+                            command=self._save_and_connect).pack(
+                side="left", padx=(8, 0))
             self._sync_kind()
 
         def _form_field(self, parent, label, var):
-            row = ttk.Frame(parent, style="TFrame")
-            row.pack(fill="x", pady=4)
-            ttk.Label(row, text=label, width=14, anchor="w").pack(side="left")
-            ttk.Entry(row, textvariable=var).pack(side="left", fill="x", expand=True)
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(fill="x", pady=(0, 8))
+            ctk.CTkLabel(row, text=label, width=110, anchor="w",
+                         font=aura.font()).pack(side="left")
+            aura.AuraEntry(row, textvariable=var).pack(side="left", fill="x",
+                                                       expand=True)
 
         def _sync_kind(self):
             if self.kind_var.get() == "sqlite":
                 self.url_row.pack_forget()
                 self.pw_check.pack_forget()
-                self.path_row.pack(fill="x", pady=4)
+                self.path_row.pack(fill="x", pady=(0, 8))
             else:
                 self.path_row.pack_forget()
-                self.url_row.pack(fill="x", pady=4)
+                self.url_row.pack(fill="x", pady=(0, 8))
                 self.pw_check.pack(anchor="w", pady=(2, 0))
 
         def _enter_connections(self):
@@ -545,7 +358,7 @@ def build_app():
             try:
                 profiles = conn.list_profiles()
             except DBError as ex:
-                self._show_error(str(ex))
+                self.set_error(str(ex))
                 profiles = []
             self.prof_list.delete(0, "end")
             self._profile_names = []
@@ -591,7 +404,8 @@ def build_app():
         def _build_profile_from_form(self):
             name = self.name_var.get().strip()
             if self.kind_var.get() == "sqlite":
-                return conn.make_profile(name, "sqlite", path=self.path_var.get().strip())
+                return conn.make_profile(name, "sqlite",
+                                         path=self.path_var.get().strip())
             return conn.make_profile(name, "url", url=self.url_var.get().strip(),
                                      store_password=self.store_pw_var.get())
 
@@ -602,10 +416,10 @@ def build_app():
                                  path=prof.get("path"), url=prof.get("url"),
                                  store_password=prof.get("store_password", False))
             except DBError as ex:
-                self._show_error(str(ex))
+                self.set_error(str(ex))
                 return None
             self._refresh_profiles()
-            self._show_ok(f"Saved profile “{prof['name']}”.")
+            self.set_success(f"Saved profile “{prof['name']}”.")
             return prof
 
         def _save_and_connect(self):
@@ -623,20 +437,20 @@ def build_app():
             try:
                 conn.remove_profile(name)
             except DBError as ex:
-                self._show_error(str(ex))
+                self.set_error(str(ex))
                 return
             self._refresh_profiles()
-            self._show_ok(f"Deleted profile “{name}”.")
+            self.set_success(f"Deleted profile “{name}”.")
 
         def _connect_selected(self):
             name = self._selected_profile_name()
             if not name:
-                self._show_error("Select a profile to connect to.")
+                self.set_error("Select a profile to connect to.")
                 return
             try:
                 prof = conn.get_profile(name)
             except DBError as ex:
-                self._show_error(str(ex))
+                self.set_error(str(ex))
                 return
             self._do_connect(prof)
 
@@ -665,8 +479,8 @@ def build_app():
                 self.browse_table = None
                 guiconfig.add_recent(prof["name"])
                 self.conn_lbl.configure(text=f"connected: {prof['name']}")
-                self._show_ok(f"Connected to “{prof['name']}”.")
-                self.select_section("browser")
+                self.show("browser")
+                self.set_success(f"Connected to “{prof['name']}”.")
 
             self._bg(work, ok, busy="Connecting…")
 
@@ -681,7 +495,7 @@ def build_app():
             try:
                 prof = conn.make_profile(name, "sqlite", path=p)
             except DBError as ex:
-                self._show_error(str(ex))
+                self.set_error(str(ex))
                 return
             self._do_connect(prof)
 
@@ -689,38 +503,43 @@ def build_app():
         # Section: Browser
         # =================================================================
         def _build_browser(self, parent):
-            left = ttk.Frame(parent, style="TFrame")
-            left.pack(side="left", fill="y", padx=(0, 12))
-            top = ttk.Frame(left, style="TFrame")
+            self._desc(parent, "browser")
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(fill="both", expand=True)
+
+            left = ctk.CTkFrame(row, fg_color="transparent")
+            left.pack(side="left", fill="y", padx=(0, 14))
+            top = ctk.CTkFrame(left, fg_color="transparent")
             top.pack(fill="x")
-            ttk.Label(top, text="Tables & views", style="Sub.TLabel").pack(side="left")
-            ttk.Button(top, text="↻", width=3, command=self._refresh_tree).pack(
-                side="right")
+            aura.SectionLabel(top, "Tables & views").pack(side="left")
+            aura.AuraButton(top, "↻", kind="ghost", width=30, height=26,
+                            command=self._refresh_tree).pack(side="right")
             self.tree = ttk.Treeview(left, show="tree", selectmode="browse",
                                      height=22)
-            self.tree.pack(fill="y", expand=True, pady=(4, 0))
+            self.tree.pack(fill="y", expand=True, pady=(6, 0))
             self.tree.column("#0", width=230)
             self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
-            right = ttk.Frame(parent, style="TFrame")
+            right = ctk.CTkFrame(row, fg_color="transparent")
             right.pack(side="left", fill="both", expand=True)
-            pg = ttk.Frame(right, style="TFrame")
+            pg = ctk.CTkFrame(right, fg_color="transparent")
             pg.pack(fill="x")
-            self.grid_title = ttk.Label(pg, text="Select a table",
-                                        style="Sub.TLabel")
+            self.grid_title = aura.Caption(pg, "Select a table")
             self.grid_title.pack(side="left")
-            ttk.Button(pg, text="Next ▶", command=lambda: self._page(1)).pack(
-                side="right")
-            ttk.Button(pg, text="◀ Prev", command=lambda: self._page(-1)).pack(
-                side="right", padx=4)
-            ttk.Button(pg, text="Edit row…", command=self._edit_row_dialog).pack(
+            aura.AuraButton(pg, "Next ▶", kind="secondary",
+                            command=lambda: self._page(1)).pack(side="right")
+            aura.AuraButton(pg, "◀ Prev", kind="secondary",
+                            command=lambda: self._page(-1)).pack(
+                side="right", padx=(0, 8))
+            aura.AuraButton(pg, "Edit row…", kind="secondary",
+                            command=self._edit_row_dialog).pack(
                 side="right", padx=(0, 16))
 
             self.grid = self._make_grid(right)
 
         def _make_grid(self, parent):
-            wrap = ttk.Frame(parent, style="TFrame")
-            wrap.pack(fill="both", expand=True, pady=(6, 0))
+            wrap = ctk.CTkFrame(parent, fg_color="transparent")
+            wrap.pack(fill="both", expand=True, pady=(8, 0))
             grid = ttk.Treeview(wrap, show="headings", selectmode="browse")
             vsb = ttk.Scrollbar(wrap, orient="vertical", command=grid.yview)
             hsb = ttk.Scrollbar(wrap, orient="horizontal", command=grid.xview)
@@ -732,14 +551,15 @@ def build_app():
 
         def _enter_browser(self):
             if self.engine is None:
-                self.grid_title.configure(text="Not connected — open Connections first.")
+                self.grid_title.configure(
+                    text="Not connected — open Connections first.")
                 return
             if not self.tree.get_children():
                 self._refresh_tree()
 
         def _refresh_tree(self):
             if self.engine is None:
-                self._show_error("Connect to a database first.")
+                self.set_error("Connect to a database first.")
                 return
             self.tree.delete(*self.tree.get_children())
 
@@ -750,16 +570,19 @@ def build_app():
 
             def ok(res):
                 tables, views = res
-                tnode = self.tree.insert("", "end", text=f"Tables ({len(tables)})",
+                tnode = self.tree.insert("", "end",
+                                         text=f"Tables ({len(tables)})",
                                          open=True)
                 for t in tables:
                     self.tree.insert(tnode, "end", text=t, values=("table", t))
                 if views:
-                    vnode = self.tree.insert("", "end",
-                                             text=f"Views ({len(views)})", open=True)
+                    vnode = self.tree.insert(
+                        "", "end", text=f"Views ({len(views)})", open=True)
                     for v in views:
-                        self.tree.insert(vnode, "end", text=v, values=("view", v))
-                self._show_ok(f"{len(tables)} table(s), {len(views)} view(s).")
+                        self.tree.insert(vnode, "end", text=v,
+                                         values=("view", v))
+                self.set_success(f"{len(tables)} table(s), "
+                                 f"{len(views)} view(s).")
 
             self._bg(work, ok, busy="Loading…")
 
@@ -798,30 +621,40 @@ def build_app():
                 end = offset + len(result["rows"])
                 self.grid_title.configure(
                     text=f"{table}  —  rows {start}–{end}")
-                self._show_ok(f"{len(result['rows'])} row(s) "
-                              f"in {result['elapsed']:.3f}s.")
+                self.set_success(f"{len(result['rows'])} row(s) "
+                                 f"in {result['elapsed']:.3f}s.")
 
             self._bg(work, ok, busy="Loading…")
 
         def _fill_grid(self, grid, result):
             grid.delete(*grid.get_children())
             cols = result.get("columns") or []
+            rows = result.get("rows") or []
             grid["columns"] = cols
-            for c in cols:
-                grid.heading(c, text=c)
-                grid.column(c, width=max(80, min(260, len(str(c)) * 12)),
+            for i, c in enumerate(cols):
+                # size by header AND a sample of the data so values aren't
+                # clipped; data columns keep their real names (spaced() would
+                # mangle arbitrary SQL identifiers) — the Aura heading style
+                # still applies the 9pt bold muted look.
+                longest = len(str(c))
+                for row in rows[:50]:
+                    v = row[i]
+                    if v is not None:
+                        longest = max(longest, len(str(v)))
+                grid.heading(c, text=c, anchor="w")
+                grid.column(c, width=max(80, min(320, 24 + longest * 8)),
                             stretch=False, anchor="w")
-            for row in result.get("rows") or []:
+            for row in rows:
                 grid.insert("", "end",
                             values=["" if v is None else v for v in row])
 
         def _edit_row_dialog(self):
             if not self.browse_table:
-                self._show_error("Open a table first.")
+                self.set_error("Open a table first.")
                 return
             sel = self.grid.selection()
             if not sel:
-                self._show_error("Select a row in the grid to edit.")
+                self.set_error("Select a row in the grid to edit.")
                 return
             cols = list(self.grid["columns"])
             values = self.grid.item(sel[0], "values")
@@ -834,7 +667,7 @@ def build_app():
                 return edit.update_row(self.engine, table, key, new_values)
 
             def ok(n):
-                self._show_ok(f"Updated {n} row(s).")
+                self.set_success(f"Updated {n} row(s).")
                 self._load_page()
 
             self._bg(work, ok, busy="Saving…")
@@ -844,7 +677,7 @@ def build_app():
                 return edit.delete_row(self.engine, table, key)
 
             def ok(n):
-                self._show_ok(f"Deleted {n} row(s).")
+                self.set_success(f"Deleted {n} row(s).")
                 self._load_page()
 
             self._bg(work, ok, busy="Deleting…")
@@ -853,34 +686,41 @@ def build_app():
         # Section: SQL editor
         # =================================================================
         def _build_sql(self, parent):
-            bar = ttk.Frame(parent, style="TFrame")
+            self._desc(parent, "sql")
+            bar = ctk.CTkFrame(parent, fg_color="transparent")
             bar.pack(fill="x")
-            ttk.Button(bar, text="▶ Run", style="Accent.TButton",
-                       command=self._run_sql).pack(side="left")
-            ttk.Label(bar, text="  Limit").pack(side="left")
+            aura.AuraButton(bar, "▶ Run",
+                            command=self._run_sql).pack(side="left")
+            ctk.CTkLabel(bar, text="Limit", font=aura.font()).pack(
+                side="left", padx=(14, 6))
             self.limit_var = tk.StringVar(value="1000")
-            ttk.Entry(bar, textvariable=self.limit_var, width=8).pack(side="left",
-                                                                      padx=4)
-            ttk.Button(bar, text="Export CSV…",
-                       command=lambda: self._export("csv")).pack(side="right")
-            ttk.Button(bar, text="Export JSON…",
-                       command=lambda: self._export("json")).pack(side="right", padx=4)
+            aura.AuraEntry(bar, textvariable=self.limit_var, width=80).pack(
+                side="left")
+            aura.AuraButton(bar, "Export CSV…", kind="secondary",
+                            command=lambda: self._export("csv")).pack(
+                side="right")
+            aura.AuraButton(bar, "Export JSON…", kind="secondary",
+                            command=lambda: self._export("json")).pack(
+                side="right", padx=(0, 8))
 
+            # the SQL editor stays a raw tk.Text (undo stack, plain keymap);
+            # aura.track keeps it in step with the dark/light toggle.
             self.sql_text = tk.Text(parent, height=8, wrap="none", undo=True)
-            self.sql_text.pack(fill="x", pady=(8, 6))
-            self.track(self.sql_text, "text")
+            self.sql_text.pack(fill="x", pady=(10, 8))
+            aura.track(self.sql_text, "text")
             self.sql_text.insert("1.0", "SELECT 1;")
-            self.sql_text.bind("<Control-Return>", lambda _e: (self._run_sql(), "break"))
+            self.sql_text.bind("<Control-Return>",
+                               lambda _e: (self._run_sql(), "break"))
 
             self.sql_grid = self._make_grid(parent)
 
         def _run_sql(self):
             if self.engine is None:
-                self._show_error("Connect to a database first.")
+                self.set_error("Connect to a database first.")
                 return
             sql = self.sql_text.get("1.0", "end").strip()
             if not sql:
-                self._show_error("Enter a SQL statement to run.")
+                self.set_error("Enter a SQL statement to run.")
                 return
             try:
                 limit = int(self.limit_var.get() or 0)
@@ -894,17 +734,18 @@ def build_app():
                 self.last_result = result
                 self._fill_grid(self.sql_grid, result)
                 if result["columns"]:
-                    self._show_ok(f"{result['rowcount']} row(s) in "
-                                  f"{result['elapsed']:.3f}s.")
+                    self.set_success(f"{result['rowcount']} row(s) in "
+                                     f"{result['elapsed']:.3f}s.")
                 else:
-                    self._show_ok(f"OK — {result['rowcount']} row(s) affected in "
-                                  f"{result['elapsed']:.3f}s.")
+                    self.set_success(
+                        f"OK — {result['rowcount']} row(s) affected in "
+                        f"{result['elapsed']:.3f}s.")
 
             self._bg(work, ok, busy="Running…")
 
         def _export(self, fmt):
             if not self.last_result or not self.last_result.get("columns"):
-                self._show_error("Run a query that returns rows first.")
+                self.set_error("Run a query that returns rows first.")
                 return
             ext = ".csv" if fmt == "csv" else ".json"
             path = filedialog.asksaveasfilename(
@@ -918,7 +759,7 @@ def build_app():
                 return query.export_result(result, path, fmt=fmt)
 
             def ok(n):
-                self._show_ok(f"Exported {n} row(s) to {path}.")
+                self.set_success(f"Exported {n} row(s) to {path}.")
 
             self._bg(work, ok, busy="Exporting…")
 
@@ -926,18 +767,21 @@ def build_app():
         # Section: ERD
         # =================================================================
         def _build_erd(self, parent):
-            bar = ttk.Frame(parent, style="TFrame")
+            self._desc(parent, "erd")
+            bar = ctk.CTkFrame(parent, fg_color="transparent")
             bar.pack(fill="x")
-            ttk.Button(bar, text="Build ER model", style="Accent.TButton",
-                       command=self._build_erd_model).pack(side="left")
+            aura.AuraButton(bar, "Build ER model",
+                            command=self._build_erd_model).pack(side="left")
+            # the ER overview stays a raw tk.Text (read-only rendering of
+            # erd_summary()); tracked so it follows the theme toggle.
             self.erd_text = tk.Text(parent, wrap="none")
-            self.erd_text.pack(fill="both", expand=True, pady=(8, 0))
-            self.track(self.erd_text, "text")
+            self.erd_text.pack(fill="both", expand=True, pady=(10, 0))
+            aura.track(self.erd_text, "text")
             self.erd_text.configure(state="disabled")
 
         def _build_erd_model(self):
             if self.engine is None:
-                self._show_error("Connect to a database first.")
+                self.set_error("Connect to a database first.")
                 return
 
             def work():
@@ -948,19 +792,37 @@ def build_app():
                 self.erd_text.delete("1.0", "end")
                 self.erd_text.insert("1.0", text)
                 self.erd_text.configure(state="disabled")
-                self._show_ok("ER model built.")
+                self.set_success("ER model built.")
 
             self._bg(work, ok, busy="Analysing…")
 
-        # ---- misc ---------------------------------------------------------
-        def _about(self):
-            messagebox.showinfo(
-                "About DBExplorer",
-                f"{APP_NAME} {APP_VERSION}\n\n"
-                "A fast, offline, 100% open-source universal SQL client.\n"
-                "Built on SQLAlchemy. Apache-2.0.\n\n"
-                "Published on QuickOpen — quickopen.ai")
+        # =================================================================
+        # Section: About
+        # =================================================================
+        def _build_about(self, parent):
+            card = aura.Card(parent, title="About DBExplorer")
+            card.pack(fill="x")
+            aura.Heading(card.body, APP_NAME).pack(anchor="w")
+            aura.Caption(card.body, f"Version {APP_VERSION}").pack(
+                anchor="w", pady=(0, 10))
+            ctk.CTkLabel(
+                card.body, font=aura.font(), justify="left", anchor="w",
+                wraplength=520,
+                text="A fast, offline, 100% open-source universal SQL client "
+                     "— browse, query and edit SQLite, Postgres and MySQL "
+                     "databases.\n\n"
+                     "100% AI-built, open source, published on QuickOpen. "
+                     "Nothing is ever uploaded anywhere.").pack(anchor="w")
+            aura.Caption(card.body,
+                         "Licensed under Apache-2.0. Built on SQLAlchemy "
+                         "(MIT) and CustomTkinter (MIT).").pack(
+                anchor="w", pady=(10, 4))
+            aura.AuraButton(card.body, "Project page: quickopen.ai",
+                            kind="ghost",
+                            command=lambda: open_with_default_app(
+                                PROJECT_URL)).pack(anchor="w", pady=(6, 0))
 
+        # ---- misc ---------------------------------------------------------
         def _on_close(self):
             if self.engine is not None:
                 try:
@@ -979,6 +841,7 @@ def build_app():
             self.title(f"Edit row — {table}")
             self.transient(app)
             self.resizable(False, False)
+            self.configure(bg=aura.P("bg"))
             self._vars = {}
             self._original = dict(current)
 
@@ -1008,15 +871,14 @@ def build_app():
             btns = ttk.Frame(frame, style="TFrame")
             btns.grid(row=len(current) + 1, column=0, columnspan=2,
                       sticky="e", pady=(10, 0))
-            save = ttk.Button(btns, text="Save changes", style="Accent.TButton",
-                              command=self._save)
+            save = aura.AuraButton(btns, "Save changes", command=self._save)
             save.pack(side="left")
-            ttk.Button(btns, text="Delete row", command=self._delete).pack(
-                side="left", padx=6)
-            ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="left")
+            aura.AuraButton(btns, "Delete row", kind="danger",
+                            command=self._delete).pack(side="left", padx=8)
+            aura.AuraButton(btns, "Cancel", kind="secondary",
+                            command=self.destroy).pack(side="left")
             if not self._pk:
                 save.state(["disabled"])
-            app._apply_theme()
             try:
                 self.grab_set()
             except Exception:
@@ -1028,7 +890,8 @@ def build_app():
         def _save(self):
             if not self._pk:
                 return
-            new_values = {c: v.get() for c, v in self._vars.items() if c not in self._pk}
+            new_values = {c: v.get() for c, v in self._vars.items()
+                          if c not in self._pk}
             changed = {c: val for c, val in new_values.items()
                        if str(self._original.get(c)) != str(val)}
             if not changed:
@@ -1053,8 +916,8 @@ def main():
     """Entry point: build the root window and run. Degrades on headless hosts.
 
     Importing this module does nothing; only this function creates a Tk root.
-    With no display (a server/CI box) it prints a friendly note and returns 0
-    instead of raising.
+    With no display (a server/CI box) or without customtkinter installed, it
+    prints a friendly note and returns 0 instead of raising.
     """
     try:
         import tkinter as tk
@@ -1066,6 +929,10 @@ def main():
     try:
         App = build_app()
         app = App()
+    except ImportError as exc:
+        print(f"{APP_NAME}: the GUI needs the 'customtkinter' package "
+              f"({exc}). Install it with:  pip install customtkinter")
+        return 0
     except tk.TclError as exc:
         print(f"{APP_NAME}: no graphical display available — cannot start the GUI "
               f"here ({exc}). This app is intended for the Windows desktop.")

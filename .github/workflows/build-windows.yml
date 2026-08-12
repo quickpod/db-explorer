@@ -20,8 +20,10 @@ jobs:
           pyinstaller --onefile --windowed --name DBExplorer
           --icon db-explorer.ico
           --version-file packaging/version.txt
+          --hidden-import dbkit.__main__
           --add-data "db-explorer.ico;."
           --collect-all sqlalchemy
+          --collect-all customtkinter
           db_explorer_app.py
       - name: Stage installer inputs
         shell: pwsh
@@ -41,4 +43,10 @@ jobs:
           path: |
             dist/DBExplorer.exe
             packaging/dist/DBExplorer-Setup.exe
+          if-no-files-found: error
+      - name: Upload staging (for signed repack)
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-explorer-staging
+          path: packaging/staging
           if-no-files-found: error
