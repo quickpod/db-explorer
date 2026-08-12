@@ -1,0 +1,2 @@
+# DBExplorer runtime deps — permissive/weak-copyleft only, no AGPL/proprietary.
+SQLAlchemy>=2.0

@@ -1,0 +1,13 @@
+{
+  "slug": "db-explorer",
+  "name": "DBExplorer",
+  "tagline": "A universal offline SQL client \u2014 browse, query and edit SQLite/Postgres/MySQL.",
+  "categorySlug": "database-clients",
+  "license": "Apache-2.0",
+  "description": "Connect to SQLite, PostgreSQL and MySQL databases; browse tables and schemas, run SQL with a results grid, edit rows, view an ER diagram, and export query results to CSV/JSON. Connection profiles are stored locally; queries never leave your machine.",
+  "aiStack": "Python (tkinter + CLI), SQLAlchemy",
+  "platforms": [
+    "windows"
+  ],
+  "buildEntry": "db_explorer_app.py"
+}
