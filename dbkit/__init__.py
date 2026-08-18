@@ -47,7 +47,7 @@ from .query import (
 from .edit import delete_row, insert_row, update_row
 from .erd import build_erd, erd_summary
 
-__version__ = "1.0.0"
+__version__ = "1.0.6"
 
 __all__ = [
     "DBError",
